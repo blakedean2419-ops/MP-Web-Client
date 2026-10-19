@@ -1,0 +1,34 @@
+MP WEB CLIENT - WINDOWS LAPTOP QUICK START
+
+1. Install Node.js 24 LTS (or newer) from https://nodejs.org/en/download
+   Use the Windows installer; keep npm and Add to PATH enabled.
+2. Extract this ZIP using Extract All. Do not run inside the ZIP viewer.
+3. Open the extracted MP-Web-Client folder containing package.json.
+   Right-click an empty area and choose Open in Terminal / PowerShell.
+   If this opens Command Prompt, type powershell and press Enter first.
+4. Check installation:
+   node --version
+   npm.cmd --version
+5. Install dependencies:
+   npm.cmd ci
+6. Configure the LabVIEW connection:
+   Copy-Item .env.laptop.example .env
+   This preset uses your existing endpoint:
+   http://127.0.0.1:8001/WebService1/Random_Number(GET)
+   If an .env already exists, preserve it and update XML_SERVICE_URL instead.
+7. Keep your LabVIEW web service running. Check its URL in your browser.
+   It should return the XML response with DimSize 100.
+8. Build and start MP:
+   npm.cmd run build
+   npm.cmd start
+9. Keep the terminal open. In Edge or Chrome, enter this browser address:
+   http://localhost:3001
+   The client should show 100 tags. Successful live readings remove the demo
+   banner. A failed service connection is shown as an error, not demo data.
+10. Press Ctrl+C to stop. Next time, open a terminal in the same folder and
+    run npm.cmd start. History is retained under the data folder.
+
+If npm is not recognized, close and reopen the terminal after installing Node.
+No Git, Python, separate database, Docker or browser extension is required.
+The browser address above refers to your laptop; it is not a cloud preview.
+For access from phones/tablets on the same network, see README.md.
