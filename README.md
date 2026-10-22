@@ -1,6 +1,6 @@
 # MP Web Client
 
-A responsive, read-only web client for numeric XML telemetry. Built with React, TypeScript, Vite, Express, and SQLite. Desktop, tablet, and phone share the same application with layouts that adapt to their screen sizes.
+A responsive, read-only web client for numeric XML telemetry. Built with React, TypeScript, Vite, and Express. Desktop, tablet, and phone share the same application with layouts that adapt to their screen sizes.
 
 The current demonstration uses your 100-element LabVIEW `Random_Number(GET)` response format. It simulates changes to those values and clearly labels them as demo data. It does **not** connect to your laptop until configured with a reachable URL.
 
@@ -17,10 +17,10 @@ npm ci
 npm run dev
 ```
 
-Vite serves the browser client on port 5173 and forwards `/api` to the server on port 3001. The API binds to loopback by default. With no `XML_SERVICE_URL`, it runs a labeled demo and seeds one hour of simulated history. Fonts are served locally; the dashboard does not require an external font service.
+Vite serves the browser client on port 5173 and forwards `/api` to the server on port 3001. The API binds to loopback by default. With no `XML_SERVICE_URL`, it runs a labeled demo with no historical recording. Fonts are served locally; the dashboard does not require an external font service.
 
 ```sh
-npm test          # XML parser, SQLite, API and real polling integration tests
+npm test          # XML parser, API and real polling integration tests
 npm run build    # Type checks, builds the API, builds the browser application
 npm start        # Serves the production application and API together on port 3001
 npm run test:e2e # Browser workflows at desktop, tablet, and phone sizes
@@ -47,7 +47,7 @@ npm run build
 npm start
 ```
 
-Phones and tablets connect to the laptop's LAN IP on port 3001. The MP server continues to use the loopback LabVIEW address. All devices then share the server's recorded history. This initial client is intended for a trusted development/local network; it does not yet include user authentication.
+Phones and tablets connect to the laptop's LAN IP on port 3001. The MP server continues to use the loopback LabVIEW address. Each browser keeps its own temporary live trend buffer. This initial client is intended for a trusted development/local network; it does not yet include user authentication.
 
 Optional service authentication stays on the server:
 
@@ -83,7 +83,7 @@ This yields two independent tags:
 
 `DimSize` is metadata, not a measurement. The parser checks the declared count against the element names and values. Repeated names are safe because array indices identify the tags. **Array order must stay consistent:** changing the order changes which signal belongs to an index. Use an explicit mapping or stable upstream IDs when channel order can change. One-dimensional numeric arrays are supported; clusters and multidimensional arrays need a schema adapter.
 
-Numbers use IEEE 754 double precision in JavaScript and SQLite `REAL`. The live cards show two decimal places for readability; history tables and CSV preserve the JavaScript double representation. Values do not gain additional precision beyond a double. Sample timestamps represent successful server polling time, not acquisition timestamps from LabVIEW.
+Numbers use IEEE 754 double precision in JavaScript. The group values show three decimal places for readability; chart tooltips show up to six. Values do not gain additional precision beyond a double. Sample timestamps represent successful server polling time, not acquisition timestamps from LabVIEW.
 
 Named XML tags also work:
 
@@ -131,24 +131,25 @@ XML_TAG_MAP=./config/tag-map.json
 
 Names, units, and thresholds in this example are illustrative: configure them to match the actual instruments. Namespace prefixes and attribute keys (`@_name`) must be included in explicit paths as returned by `fast-xml-parser`. Without metadata, gauge ranges are display defaults, not known engineering limits. Demo values use a display range of 0–10.
 
-## Dashboard and history
+## Live dashboard
 
-- Overview: live values, a selectable tag trend, HMI gauges or numeric tiles, and recent tag activity.
-- Trends: choose any tag and a rolling 15-minute, 1-hour, 6-hour, or 24-hour range.
-- Tag explorer: search names/IDs and browse 25 tags per page.
-- History: custom time ranges up to 31 days, sample table, and CSV download.
-- Customize view: choose HMI tiles and display types. Preferences are saved per browser. Layouts adapt automatically to desktop, tablet, and phone.
+The dark dashboard shows editable tag groups beside a shared graph with multiple traces. The initial groups (Fuel and Air, Fuel Splits, Emissions, Pulsation) contain the first detected tags as placeholders; configure membership to match your instruments. They do not imply engineering semantics for unnamed LabVIEW channels.
 
-The API polls serially, with a configurable delay after each request, a 10-second request timeout and a 2 MB XML response limit. DTD/entity declarations, duplicate IDs, mismatched array dimensions and nonfinite measurements are rejected. Named records with bad quality remain visible but their values are not added to trend history.
+- Edit the dashboard, group, and graph titles directly in their headings.
+- Use a group's **+** button to search and add/remove tags or delete the group. **Add group** creates another panel.
+- Click a group value to add that signal to the shared graph. **Add Trace / Configure Traces** lets you search all tags, add/remove traces, choose colors, and toggle visibility. Legend checkboxes also toggle visibility.
+- Set a rolling time window (60–3,600 seconds), browser refresh rate, automatic/manual Y axis, and relative/clock time. These affect the display only; the server polling interval remains `POLL_INTERVAL_MS`.
+- Titles, groups and trace preferences save automatically per browser. Chart settings apply to the current session.
 
-SQLite stores data in `data/demo/history.sqlite` or `data/xml/history.sqlite` (separate databases prevent demo values mixing with real measurements). Change the storage root with `DATA_DIR`. Retention defaults to 30 days and pruning runs hourly. Set `HISTORY_RETENTION_DAYS` and `POLL_INTERVAL_MS` for your data volume; 100 tags every 2 seconds is about 4.3 million samples per day. Back up the data directory and use a persistent disk if you deploy the server.
+The client contains no acquisition start/stop controls, recording controls, history viewer, or CSV export. It only reads the service. **No measurement data is written to disk.** The server keeps the latest snapshot in memory; each open browser retains at most one hour or 7,200 live snapshots for its chart. Reloading clears the trend buffer. Existing data folders from older versions are left untouched and are not read by this version.
 
-Charts and CSV return at most 600 representative samples per request. For longer ranges, SQLite preserves bucket minima/maxima plus the endpoints. Min/average/max in the chart footer describe these displayed samples; they are not time-weighted whole-period statistics. This is a trend export, not a complete raw-data archive. The table shows the latest 100 chart samples. The original retained readings remain in SQLite.
+A shared amplitude axis overlays raw values in their original units; use compatible units or interpret mixed-unit traces carefully. Bad-quality measurements are displayed as unavailable and create gaps in their traces. Failed polling displays a stale-data warning without introducing simulated readings. Sample timestamps represent successful server polling time, not LabVIEW acquisition timestamps.
+
+The API polls serially with a configurable delay after each request, a 10-second timeout and a 2 MB XML response limit. DTD/entity declarations, duplicate IDs, mismatched array dimensions and nonfinite measurements are rejected.
 
 ## API
 
-- `GET /api/health` — API availability, mode, XML connection state and last successful poll. HTTP 200 means the API is running; check `connected` separately.
-- `GET /api/snapshot` — tags, full-precision values, quality and service status.
-- `GET /api/history?tag=Array%5B0%5D&from=<unix-ms>&to=<unix-ms>` — historical samples, limited to a 31-day request span.
+- `GET /api/health` — API availability, mode, XML connection state and last successful poll. Check `connected` separately from HTTP status.
+- `GET /api/snapshot` — current tags, full-precision values, quality and service status.
 
-The production application is served by the same Express server, so no cross-origin browser configuration is needed. For a separately hosted frontend, configure `CLIENT_ORIGIN` on the API server and an appropriate frontend API proxy.
+Historical endpoints are not available. The production application is served by the same Express server. For a separately hosted frontend, configure `CLIENT_ORIGIN` and an appropriate API proxy.

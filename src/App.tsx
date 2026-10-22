@@ -1,1047 +1,474 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Activity,
-  ArrowDownToLine,
-  ArrowRight,
-  Check,
-  ChevronRight,
-  CircleHelp,
-  Clock3,
-  Database,
-  Gauge,
-  LayoutDashboard,
-  Menu,
-  Monitor,
-  Radio,
-  Search,
+  Flame,
+  Fuel,
+  Leaf,
+  Plus,
   Settings2,
-  SlidersHorizontal,
-  Tags,
+  Trash2,
   TrendingUp,
-  Waves,
   Wifi,
-  WifiOff,
   X,
 } from "lucide-react";
-import type { Sample, Snapshot, Tag } from "./types";
+import TrendChart, { type Trace, type Reading } from "./TrendChart";
+import type { Snapshot } from "./types";
 
-type Page = "Overview" | "Trends" | "Tag explorer" | "History";
-type Widget = { id: string; kind: "gauge" | "value" };
-const colors = [
-  "#159d8b",
-  "#cd9046",
-  "#6b80c5",
-  "#3999bd",
-  "#a276b4",
-  "#76995a",
+type Group = { id: string; title: string; tags: string[] };
+type Layout = {
+  title: string;
+  chartTitle: string;
+  groups: Group[];
+  traces: Trace[];
+};
+const palette = [
+  "#42ed18",
+  "#008cff",
+  "#ff3737",
+  "#d742ff",
+  "#ffd000",
+  "#46dded",
 ];
-const ranges = [
-  { label: "15 min", ms: 900000 },
-  { label: "1 hour", ms: 3600000 },
-  { label: "6 hours", ms: 21600000 },
-  { label: "24 hours", ms: 86400000 },
-];
-const format = (n: number) =>
-  n.toLocaleString(undefined, {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
-const time = (n: number) =>
-  new Date(n).toLocaleTimeString([], {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-const dateTime = (n: number) => new Date(n).toLocaleString();
-const TrendChart = lazy(() => import("./TrendChart"));
-function loadWidgets(): Widget[] | null {
+const key = "mp-dashboard-v2";
+function load(): Layout | null {
   try {
-    const value: unknown = JSON.parse(
-      localStorage.getItem("mp-widgets-v1") || "null",
-    );
-    return Array.isArray(value) &&
-      value.every(
-        (item) =>
-          item &&
-          typeof item.id === "string" &&
-          ["gauge", "value"].includes(item.kind),
+    const v = JSON.parse(localStorage.getItem(key) || "null");
+    return v &&
+      typeof v.title === "string" &&
+      typeof v.chartTitle === "string" &&
+      Array.isArray(v.groups) &&
+      v.groups.every(
+        (g: Group) =>
+          typeof g.id === "string" &&
+          typeof g.title === "string" &&
+          Array.isArray(g.tags) &&
+          g.tags.every((id) => typeof id === "string"),
+      ) &&
+      Array.isArray(v.traces) &&
+      v.traces.every(
+        (t: Trace) =>
+          typeof t.id === "string" &&
+          /^#[0-9a-f]{6}$/i.test(t.color) &&
+          typeof t.visible === "boolean",
       )
-      ? value
+      ? v
       : null;
   } catch {
     return null;
   }
 }
-function TagGauge({
-  tag,
-  color,
-  kind,
-}: {
-  tag: Tag;
-  color: string;
-  kind: Widget["kind"];
-}) {
-  const percent = Math.max(
-    0,
-    Math.min(100, ((tag.value - tag.min) / (tag.max - tag.min)) * 100),
-  );
-  const alarm = tag.warning !== undefined && tag.value >= tag.warning;
-  return (
-    <div className={`hmi-widget ${alarm ? "warning" : ""}`}>
-      <div className="widget-title">
-        <span className="tag-code">{tag.id}</span>
-        <span
-          className={`quality-dot ${tag.quality === "bad" ? "bad" : ""}`}
-          title={`Quality: ${tag.quality}`}
-        />
-      </div>
-      <div className="widget-name">{tag.name}</div>
-      <div className="widget-value" title={String(tag.value)}>
-        {format(tag.value)} <span>{tag.unit}</span>
-      </div>
-      {kind === "gauge" && (
-        <>
-          <div className="gauge-track">
-            <div
-              style={{
-                width: `${percent}%`,
-                background: alarm ? "#c18427" : color,
-              }}
-            />
-            {tag.warning !== undefined && (
-              <i
-                style={{
-                  left: `${Math.max(0, Math.min(100, ((tag.warning - tag.min) / (tag.max - tag.min)) * 100))}%`,
-                }}
-                title={`High threshold: ${tag.warning} ${tag.unit}`}
-              />
-            )}
-          </div>
-          <div className="gauge-labels">
-            <span>{tag.min}</span>
-            <span>
-              {tag.max} {tag.unit}
-            </span>
-          </div>
-        </>
-      )}
-      {alarm && <span className="threshold-label">Above high threshold</span>}
-    </div>
-  );
-}
-
 export default function App() {
-  const [page, setPage] = useState<Page>("Overview");
+  const [layout, setLayout] = useState<Layout | null>(load);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
-  const [networkError, setNetworkError] = useState("");
-  const [historyError, setHistoryError] = useState("");
-  const [samples, setSamples] = useState<Sample[]>([]);
-  const [historyLoading, setHistoryLoading] = useState(true);
-  const [selectedId, setSelectedId] = useState("");
-  const [range, setRange] = useState(3600000);
+  const [error, setError] = useState("");
+  const [storageError, setStorageError] = useState(false);
+  const [readings, setReadings] = useState<Reading[]>([]);
+  const [modal, setModal] = useState<string | null>(null);
   const [search, setSearch] = useState("");
-  const [tablePage, setTablePage] = useState(0);
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [modal, setModal] = useState<"layout" | "source" | null>(null);
-  const [widgets, setWidgets] = useState<Widget[] | null>(loadWidgets);
-  const [draftWidgets, setDraftWidgets] = useState<Widget[]>([]);
-  const [notice, setNotice] = useState("");
-  const [customRange, setCustomRange] = useState<{
-    from: number;
-    to: number;
-  } | null>(null);
-  const [dateFrom, setDateFrom] = useState("");
-  const [dateTo, setDateTo] = useState("");
-  const searchRef = useRef<HTMLInputElement>(null);
+  const [windowSeconds, setWindowSeconds] = useState(800);
+  const [updateMs, setUpdateMs] = useState(500);
+  const [yMin, setYMin] = useState(0);
+  const [yMax, setYMax] = useState(100);
+  const [autoY, setAutoY] = useState(true);
+  const [relative, setRelative] = useState(true);
   const dialogRef = useRef<HTMLDivElement>(null);
-  const modalTrigger = useRef<HTMLElement | null>(null);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    let pending = false;
-    async function refresh() {
-      if (pending) return;
-      pending = true;
-      try {
-        const response = await fetch("/api/snapshot", {
-          signal: controller.signal,
-        });
-        if (!response.ok) throw new Error("The data server is unavailable.");
-        const data: Snapshot = await response.json();
-        setSnapshot(data);
-        setNetworkError("");
-        setSelectedId((id) =>
-          data.tags.some((tag) => tag.id === id) ? id : data.tags[0]?.id || "",
-        );
-      } catch (error) {
-        if (!controller.signal.aborted)
-          setNetworkError(
-            error instanceof Error
-              ? error.message
-              : "Cannot connect to the data server.",
-          );
-      } finally {
-        pending = false;
-      }
-    }
-    void refresh();
-    const timer = setInterval(refresh, 2000);
-    return () => {
-      controller.abort();
-      clearInterval(timer);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!selectedId) {
-      setHistoryLoading(false);
-      return;
-    }
-    const controller = new AbortController();
-    let pending = false;
-    setSamples([]);
-    setHistoryLoading(true);
-    setHistoryError("");
-    async function refresh() {
-      if (pending) return;
-      pending = true;
-      try {
-        const to = customRange?.to ?? Date.now();
-        const from = customRange?.from ?? to - range;
-        const response = await fetch(
-          `/api/history?${new URLSearchParams({ tag: selectedId, from: String(from), to: String(to) })}`,
-          { signal: controller.signal },
-        );
-        if (!response.ok)
-          throw new Error(
-            "History could not be loaded. Try a range of 31 days or less.",
-          );
-        const data: { samples: Sample[] } = await response.json();
-        setSamples(data.samples);
-        setHistoryError("");
-      } catch (error) {
-        if (!controller.signal.aborted)
-          setHistoryError(
-            error instanceof Error
-              ? error.message
-              : "History could not be loaded.",
-          );
-      } finally {
-        if (!controller.signal.aborted) setHistoryLoading(false);
-        pending = false;
-      }
-    }
-    void refresh();
-    const timer = customRange ? undefined : setInterval(refresh, 4000);
-    return () => {
-      controller.abort();
-      if (timer) clearInterval(timer);
-    };
-  }, [selectedId, range, customRange]);
-
-  useEffect(() => {
-    function onKey(event: KeyboardEvent) {
-      const typing = ["INPUT", "SELECT", "TEXTAREA"].includes(
-        (event.target as HTMLElement)?.tagName,
-      );
-      if (event.key === "/" && !typing && !modal) {
-        event.preventDefault();
-        searchRef.current?.focus();
-      }
-      if (event.key === "Escape") {
-        setModal(null);
-        setMenuOpen(false);
-      }
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [modal]);
+  const triggerRef = useRef<HTMLElement | null>(null);
   useEffect(() => {
     if (!modal) return;
-    modalTrigger.current = document.activeElement as HTMLElement;
-    dialogRef.current
-      ?.querySelector<HTMLElement>("button, input, select")
-      ?.focus();
-    const previous = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
+    triggerRef.current = document.activeElement as HTMLElement;
+    dialogRef.current?.querySelector<HTMLElement>("button, input")?.focus();
+    const escape = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setModal(null);
+    };
+    document.addEventListener("keydown", escape);
     return () => {
-      document.body.style.overflow = previous;
-      modalTrigger.current?.focus();
+      document.removeEventListener("keydown", escape);
+      triggerRef.current?.focus();
     };
   }, [modal]);
   useEffect(() => {
-    if (!notice) return;
-    const id = setTimeout(() => setNotice(""), 4000);
-    return () => clearTimeout(id);
-  }, [notice]);
-  useEffect(() => {
-    setTablePage(0);
-  }, [search, page]);
-
-  const tags = snapshot?.tags ?? [];
-  const selected = tags.find((tag) => tag.id === selectedId);
-  const visibleTags = tags.filter((tag) =>
-    `${tag.id} ${tag.name} ${tag.description}`
-      .toLowerCase()
-      .includes(search.toLowerCase()),
-  );
-  const displayedTags =
-    page === "Overview"
-      ? visibleTags.slice(0, 6)
-      : visibleTags.slice(tablePage * 25, (tablePage + 1) * 25);
-  const activeWidgets = (
-    widgets ??
-    tags.slice(0, 3).map((tag) => ({ id: tag.id, kind: "gauge" as const }))
-  ).filter((widget) => tags.some((tag) => tag.id === widget.id));
-  const sourceFailed = Boolean(
-    networkError || (snapshot && !snapshot.status.connected),
-  );
-  const demo = snapshot?.status.mode === "demo";
-  const values = samples.map((s) => s.value);
-  const stats = values.length
-    ? {
-        min: Math.min(...values),
-        max: Math.max(...values),
-        avg: values.reduce((a, b) => a + b, 0) / values.length,
-      }
-    : null;
-  function navigate(next: Page) {
-    setPage(next);
-    setMenuOpen(false);
-  }
-  function customize() {
-    setDraftWidgets([...activeWidgets]);
-    setModal("layout");
-  }
-  function exportCsv() {
-    if (!selected || !samples.length) return;
-    const safe = (text: string) =>
-      `"${(/^[=+\-@\t\r]/.test(text) ? "'" + text : text).replaceAll('"', '""')}"`;
-    const csv = [
-      "timestamp,tag,name,value,unit",
-      ...samples.map(
-        (sample) =>
-          `${new Date(sample.timestamp).toISOString()},${safe(selected.id)},${safe(selected.name)},${sample.value},${safe(selected.unit)}`,
-      ),
-    ].join("\r\n");
-    const url = URL.createObjectURL(
-      new Blob([csv], { type: "text/csv;charset=utf-8" }),
-    );
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `mp-history-${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-    setNotice("History exported as CSV.");
-  }
-  function applyDates() {
-    const from = new Date(dateFrom).getTime(),
-      to = new Date(dateTo).getTime();
-    if (
-      !Number.isFinite(from) ||
-      !Number.isFinite(to) ||
-      to < from ||
-      to - from > 31 * 86400000
-    ) {
-      setNotice("Choose a valid date range of 31 days or less.");
-      return;
+    if (!layout) return;
+    try {
+      localStorage.setItem(key, JSON.stringify(layout));
+      setStorageError(false);
+    } catch {
+      setStorageError(true);
     }
-    setCustomRange({ from, to });
-  }
-
-  const trendPanel = (
-    <section className="panel trend-panel" aria-label="Tag trend">
-      <div className="panel-heading">
-        <div>
-          <div className="eyebrow">PROCESS INSIGHTS</div>
-          <h2>
-            {page === "History" ? "Historical trend" : "Live trend"}
-            <span className="heading-note">
-              {selected?.unit || "Tag values"}
-            </span>
-          </h2>
-        </div>
-        <button
-          className="icon-button"
-          title="Export displayed history"
-          aria-label="Export displayed history"
-          onClick={exportCsv}
-          disabled={!samples.length}
-        >
-          <ArrowDownToLine size={18} />
-        </button>
-      </div>
-      <div className="trend-toolbar">
-        <select
-          aria-label="Chart tag"
-          value={selectedId}
-          onChange={(e) => setSelectedId(e.target.value)}
-        >
-          {!tags.length && <option value="">No tags available</option>}
-          {tags.map((tag) => (
-            <option key={tag.id} value={tag.id}>
-              {tag.name} · {tag.id}
-            </option>
-          ))}
-        </select>
-        <div className="range-options" aria-label="Time range">
-          {ranges.map((item) => (
-            <button
-              key={item.ms}
-              className={!customRange && range === item.ms ? "active" : ""}
-              onClick={() => {
-                setRange(item.ms);
-                setCustomRange(null);
-              }}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
-      </div>
-      {page === "History" && (
-        <div className="date-filter">
-          <label>
-            From
-            <input
-              aria-label="History from"
-              type="datetime-local"
-              value={dateFrom}
-              onChange={(e) => setDateFrom(e.target.value)}
-            />
-          </label>
-          <label>
-            To
-            <input
-              aria-label="History to"
-              type="datetime-local"
-              value={dateTo}
-              onChange={(e) => setDateTo(e.target.value)}
-            />
-          </label>
-          <button className="button secondary" onClick={applyDates}>
-            Apply range
-          </button>
-        </div>
-      )}
-      <div className="trend-value">
-        <span>{selected ? format(selected.value) : "—"}</span>
-        <span>{selected?.unit}</span>
-        <span className={`live-chip ${sourceFailed ? "muted" : ""}`}>
-          <span />
-          {sourceFailed
-            ? "Stale value"
-            : demo
-              ? "Simulated live"
-              : "Current value"}
-        </span>
-      </div>
-      <div className="chart-wrap">
-        {historyError ? (
-          <div className="empty-state">
-            <WifiOff size={25} />
-            <p>{historyError}</p>
-          </div>
-        ) : historyLoading ? (
-          <div className="empty-state">
-            <Activity size={25} className="pulse" />
-            <p>Loading historical samples…</p>
-          </div>
-        ) : !samples.length ? (
-          <div className="empty-state">
-            <Database size={25} />
-            <p>No history in this time range.</p>
-            <span>Samples are recorded as the service is polled.</span>
-          </div>
-        ) : (
-          <Suspense
-            fallback={<div className="empty-state">Loading chart…</div>}
-          >
-            <TrendChart samples={samples} tag={selected} />
-          </Suspense>
-        )}
-      </div>
-      <div
-        className="chart-footer"
-        title="Statistics for the representative samples shown in the chart"
-      >
-        <span>
-          <i className="legend-dot" />
-          {selected?.id ?? "No tag selected"}
-        </span>
-        <span>
-          Min <b>{stats ? format(stats.min) : "—"}</b>
-        </span>
-        <span>
-          Avg <b>{stats ? format(stats.avg) : "—"}</b>
-        </span>
-        <span>
-          Max <b>{stats ? format(stats.max) : "—"}</b>
-        </span>
-      </div>
-      {page === "History" && (
-        <p className="sampling-note">
-          Exports and charts use up to 600 representative samples, preserving
-          bucket minima and maxima. Doubles are stored at full precision.
-        </p>
-      )}
-    </section>
+  }, [layout]);
+  useEffect(() => {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout>;
+    async function poll() {
+      try {
+        const response = await fetch("/api/snapshot", {
+          signal: AbortSignal.any([
+            controller.signal,
+            AbortSignal.timeout(10000),
+          ]),
+        });
+        if (!response.ok) throw new Error("Snapshot request failed");
+        const next: Snapshot = await response.json();
+        if (controller.signal.aborted) return;
+        setSnapshot(next);
+        setError("");
+        setLayout(
+          (current) =>
+            current ?? {
+              title: "Fuel and Air",
+              chartTitle: "Trends",
+              groups: [
+                "Fuel and Air",
+                "Fuel Splits",
+                "Emissions (15% O₂)",
+                "Pulsation",
+              ].map((title, i) => ({
+                id: `group-${i}`,
+                title,
+                tags: next.tags
+                  .slice(i * 4, i * 4 + (i === 3 ? 2 : 4))
+                  .map((t) => t.id),
+              })),
+              traces: next.tags.slice(0, 4).map((t, i) => ({
+                id: t.id,
+                color: palette[i],
+                visible: true,
+              })),
+            },
+        );
+        const timestamp = next.status.lastSuccess;
+        if (next.status.connected && timestamp)
+          setReadings((current) => {
+            if (current.at(-1)?.timestamp === timestamp) return current;
+            const values: Record<string, number | null> = {};
+            for (const tag of next.tags)
+              values[tag.id] = tag.quality === "good" ? tag.value : null;
+            return [...current, { timestamp, values }]
+              .filter((r) => r.timestamp >= timestamp - 3600000)
+              .slice(-7200);
+          });
+      } catch {
+        if (!controller.signal.aborted)
+          setError("Cannot reach MP server. Displayed values may be stale.");
+      } finally {
+        if (!controller.signal.aborted) timer = setTimeout(poll, updateMs);
+      }
+    }
+    void poll();
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+    };
+  }, [updateMs]);
+  const tags = snapshot?.tags ?? [];
+  const connected = !error && snapshot?.status.connected;
+  const change = (fn: (v: Layout) => Layout) =>
+    setLayout((v) => (v ? fn(v) : v));
+  const editGroup = (id: string, fn: (g: Group) => Group) =>
+    change((v) => ({
+      ...v,
+      groups: v.groups.map((g) => (g.id === id ? fn(g) : g)),
+    }));
+  const addTrace = (id: string) =>
+    change((v) =>
+      v.traces.some((t) => t.id === id)
+        ? v
+        : {
+            ...v,
+            traces: [
+              ...v.traces,
+              {
+                id,
+                color: palette[v.traces.length % palette.length],
+                visible: true,
+              },
+            ],
+          },
+    );
+  const group = layout?.groups.find((g) => modal === g.id);
+  const end = readings.at(-1)?.timestamp ?? Date.now();
+  const shown = readings.filter(
+    (r) => r.timestamp >= end - windowSeconds * 1000,
   );
-
+  const icons = [Flame, Fuel, Leaf, Activity];
   return (
-    <div className="app-shell">
-      <aside className={`sidebar ${menuOpen ? "open" : ""}`}>
-        <a
-          className="brand"
-          href="#"
-          onClick={(e) => {
-            e.preventDefault();
-            navigate("Overview");
-          }}
-        >
-          <span className="brand-icon">
-            <Activity size={24} strokeWidth={2.3} />
-          </span>
-          <span>
-            MP<span className="brand-light"> / client</span>
-          </span>
-        </a>
-        <div className="workspace-selector">
-          <div className="workspace-icon">
-            <Waves size={19} />
-          </div>
-          <div>
-            <strong>Process workspace</strong>
-            <small>Operations dashboard</small>
-          </div>
-          <span className="workspace-badge">01</span>
-        </div>
-        <div className="nav-label">WORKSPACE</div>
-        <nav aria-label="Main navigation">
-          {(
-            [
-              { label: "Overview", icon: LayoutDashboard },
-              { label: "Trends", icon: TrendingUp },
-              { label: "Tag explorer", icon: Tags },
-              { label: "History", icon: Clock3 },
-            ] as const
-          ).map(({ label, icon: Icon }) => (
-            <button
-              key={label}
-              className={page === label ? "nav-item active" : "nav-item"}
-              onClick={() => navigate(label)}
-            >
-              <Icon size={19} />
-              <span>{label}</span>
-              {label === "Tag explorer" && (
-                <span className="nav-count">{tags.length}</span>
-              )}
-              {page === label && <span className="nav-active-dot" />}
-            </button>
-          ))}
-        </nav>
-        <div className="sidebar-bottom">
-          <div className="source-card">
-            <div className="source-card-title">
-              <Radio size={17} />
-              <span>Data source</span>
-              <span className={`quality-dot ${sourceFailed ? "bad" : ""}`} />
-            </div>
-            <strong>
-              {demo
-                ? "Demo XML service"
-                : snapshot
-                  ? "XML web service"
-                  : "Connecting…"}
-            </strong>
-            <small>
-              {sourceFailed
-                ? "Connection needs attention"
-                : demo
-                  ? "Simulated process values"
-                  : "Read-only data connection"}
-            </small>
-            <button onClick={() => setModal("source")}>
-              Connection details <ArrowRight size={14} />
-            </button>
-          </div>
-          <button className="sidebar-help" onClick={() => setModal("source")}>
-            <CircleHelp size={18} />
-            Setup & connection guide
-            <ChevronRight size={15} />
-          </button>
-          <div className="sidebar-profile">
-            <div className="avatar">MP</div>
-            <div>
-              <strong>Local workspace</strong>
-              <small>Device preferences enabled</small>
-            </div>
-            <Monitor size={16} />
-          </div>
-        </div>
-      </aside>
-      {menuOpen && (
-        <button
-          className="sidebar-overlay"
-          aria-label="Close navigation"
-          onClick={() => setMenuOpen(false)}
+    <div className="dashboard">
+      <header className="topbar">
+        <Flame className="brand-flame" size={42} />
+        <input
+          className="dashboard-title"
+          aria-label="Dashboard title"
+          value={layout?.title ?? "Fuel and Air"}
+          onChange={(e) => change((v) => ({ ...v, title: e.target.value }))}
         />
+        <div className={`connection ${connected ? "online" : ""}`}>
+          <i />
+          {snapshot?.status.mode === "demo"
+            ? "Demo · simulated data"
+            : connected
+              ? "XML connected"
+              : "XML disconnected"}
+        </div>
+        <button onClick={() => setModal("source")}>
+          <Wifi size={16} />
+          Connection
+        </button>
+        <time>{new Date(end).toLocaleString()}</time>
+      </header>
+      {(error || snapshot?.status.error) && (
+        <div className="alert" role="alert">
+          {error || snapshot?.status.error} Values are stale. Last read:{" "}
+          {snapshot?.status.lastSuccess
+            ? new Date(snapshot.status.lastSuccess).toLocaleString()
+            : "none"}
+          .
+        </div>
       )}
-      <div className="main-shell">
-        <header className="topbar">
-          <div className="breadcrumb">
-            <button
-              className="icon-button mobile-menu"
-              aria-label="Open navigation"
-              onClick={() => setMenuOpen(true)}
-            >
-              <Menu size={21} />
-            </button>
-            <span>Workspace</span>
-            <ChevronRight size={13} />
-            <strong>{page}</strong>
-          </div>
-          <div className="topbar-right">
-            <div className="search-box">
-              <Search size={16} />
-              <input
-                ref={searchRef}
-                aria-label="Search tags"
-                placeholder="Search tags…"
-                value={search}
-                onChange={(e) => {
-                  setSearch(e.target.value);
-                  if (e.target.value) setPage("Tag explorer");
-                }}
-              />
-              <kbd>/</kbd>
-            </div>
-            <span className="topbar-divider" />
-            <div
-              className="connection-indicator"
-              title={
-                snapshot?.status.lastSuccess
-                  ? `Last sample: ${dateTime(snapshot.status.lastSuccess)}`
-                  : "No sample received"
-              }
-            >
-              {sourceFailed ? <WifiOff size={16} /> : <Wifi size={16} />}
-              <span>
-                {sourceFailed
-                  ? "Disconnected"
-                  : snapshot
-                    ? "Connected"
-                    : "Connecting"}
-              </span>
-            </div>
-          </div>
-        </header>
-        <main>
-          <div className="page-title-row">
-            <div>
-              <div className="eyebrow">YOUR PROCESS, AT A GLANCE</div>
-              <h1>
-                {page === "Overview"
-                  ? "Process overview"
-                  : page === "Trends"
-                    ? "Process trends"
-                    : page === "History"
-                      ? "Historical data"
-                      : "Tag explorer"}
-                <span className="title-dot">.</span>
-              </h1>
-              <p>
-                {page === "Overview"
-                  ? "A clear view of your process. Live values, trends, and everything in between."
-                  : page === "Trends"
-                    ? "Follow a tag over time and inspect changes in your process."
-                    : page === "History"
-                      ? "Explore recorded values and export the data behind your trends."
-                      : "Every connected tag, with its latest value and data quality."}
-              </p>
-            </div>
-            <div className="page-actions">
-              <span className={`live-status ${sourceFailed ? "offline" : ""}`}>
-                <span />
-                {sourceFailed ? "OFFLINE" : "LIVE"}
-              </span>
-              <button className="button secondary" onClick={customize}>
-                <SlidersHorizontal size={15} />
-                <span>Customize view</span>
-              </button>
-            </div>
-          </div>
-          {sourceFailed && (
-            <div className="error-banner" role="alert">
-              <WifiOff size={17} />
-              <span>
-                {networkError ||
-                  snapshot?.status.error ||
-                  "The service has not supplied a sample."}{" "}
-                Existing values are stale.
-              </span>
-              <button onClick={() => setModal("source")}>
-                Details <ArrowRight size={14} />
-              </button>
-            </div>
-          )}
-          {demo && (
-            <div className="demo-banner">
-              <div className="demo-banner-icon">
-                <Radio size={16} />
-              </div>
-              <span>
-                <strong>You’re viewing demo data.</strong> Connect your XML web
-                service to see your own process values.
-              </span>
-              <button onClick={() => setModal("source")}>
-                Connect service <ArrowRight size={14} />
-              </button>
-            </div>
-          )}
-          {!snapshot && !networkError && (
-            <div className="loading-banner">
-              <Activity className="pulse" size={18} /> Connecting to the data
-              server…
-            </div>
-          )}
-          {page === "Overview" && (
-            <>
-              <div className="section-label">
-                <h2>Live process values</h2>
-                <span>
-                  <span className="quality-dot" />
-                  Updated{" "}
-                  {snapshot?.status.lastSuccess
-                    ? time(snapshot.status.lastSuccess)
-                    : "—"}
-                </span>
-              </div>
-              <div className="metric-grid">
-                {tags.slice(0, 4).map((tag, i) => (
+      {storageError && (
+        <div role="status" className="alert">
+          Browser storage is unavailable. Changes apply to this session only.
+        </div>
+      )}
+      <div className="workspace">
+        <aside className="groups">
+          {layout?.groups.map((g, i) => {
+            const Icon = icons[i % icons.length];
+            return (
+              <section className={`tag-group group-${i % 4}`} key={g.id}>
+                <div className="panel-heading">
+                  <Icon size={23} />
+                  <input
+                    aria-label={`Group title ${i + 1}`}
+                    value={g.title}
+                    onChange={(e) =>
+                      editGroup(g.id, (old) => ({
+                        ...old,
+                        title: e.target.value,
+                      }))
+                    }
+                  />
                   <button
-                    className={`metric-card ${selectedId === tag.id ? "selected" : ""}`}
-                    key={tag.id}
-                    onClick={() => setSelectedId(tag.id)}
+                    aria-label={`Edit ${g.title}`}
+                    onClick={() => {
+                      setSearch("");
+                      setModal(g.id);
+                    }}
                   >
-                    <div className="metric-top">
-                      <span>{tag.name}</span>
-                      <span
-                        className="metric-icon"
-                        style={{ color: colors[i] }}
-                      >
-                        {i === 1 ? (
-                          <Activity size={16} />
-                        ) : i === 2 ? (
-                          <Waves size={16} />
-                        ) : (
-                          <Gauge size={16} />
-                        )}
-                      </span>
-                    </div>
-                    <div className="metric-value">
-                      {format(tag.value)}
-                      <span>{tag.unit}</span>
-                    </div>
-                    <div className="metric-bottom">
-                      <span className="tag-code">{tag.id}</span>
-                      <span
-                        className={
-                          tag.quality === "bad" ? "quality-bad" : "quality-good"
-                        }
-                      >
-                        <span
-                          className={`quality-dot ${tag.quality === "bad" ? "bad" : ""}`}
-                        />
-                        {tag.quality === "good"
-                          ? "Good quality"
-                          : "Bad quality"}
-                      </span>
-                    </div>
-                    <div className="metric-range">
-                      <span>
-                        Range {tag.min}–{tag.max} {tag.unit}
-                      </span>
-                      <span className="mini-line" style={{ color: colors[i] }}>
-                        <Gauge size={12} />
-                      </span>
-                    </div>
+                    <Plus size={20} />
                   </button>
-                ))}
-              </div>
-              <div className="dashboard-grid">
-                {trendPanel}
-                <section className="panel hmi-panel">
-                  <div className="panel-heading">
-                    <div>
-                      <div className="eyebrow">DEVICE DASHBOARD</div>
-                      <h2>
-                        Tag HMI{" "}
-                        <span className="count-badge">
-                          {activeWidgets.length}
-                        </span>
-                      </h2>
-                    </div>
-                    <button
-                      className="icon-button"
-                      title="Configure HMI tiles"
-                      aria-label="Configure HMI tiles"
-                      onClick={customize}
-                    >
-                      <Settings2 size={18} />
-                    </button>
-                  </div>
-                  <div className="hmi-subtitle">
-                    Your selected tags, in real time.
-                  </div>
-                  <div className="hmi-widgets">
-                    {activeWidgets.map((widget, i) => (
-                      <TagGauge
-                        key={widget.id}
-                        tag={tags.find((tag) => tag.id === widget.id)!}
-                        color={colors[i % colors.length]}
-                        kind={widget.kind}
-                      />
-                    ))}
-                    {!activeWidgets.length && (
-                      <div className="empty-state">
-                        <Gauge size={24} />
-                        <p>No HMI tiles selected.</p>
-                        <button className="text-button" onClick={customize}>
-                          Choose tags
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                  <button className="hmi-customize" onClick={customize}>
-                    <SlidersHorizontal size={14} />
-                    Customize this device
-                    <ArrowRight size={14} />
-                  </button>
-                </section>
-              </div>
-            </>
-          )}
-          {(page === "Trends" || page === "History") && trendPanel}
-          {(page === "Overview" || page === "Tag explorer") && (
-            <section className="panel tag-table-panel">
-              <div className="panel-heading">
-                <div>
-                  <div className="eyebrow">CONNECTED SIGNALS</div>
-                  <h2>
-                    {page === "Overview" ? "Tag activity" : "All tags"}{" "}
-                    <span className="count-badge">{visibleTags.length}</span>
-                  </h2>
                 </div>
-                {page === "Overview" ? (
-                  <button
-                    className="text-button"
-                    onClick={() => navigate("Tag explorer")}
-                  >
-                    View all tags <ArrowRight size={15} />
-                  </button>
-                ) : (
-                  <span className="table-note">Read-only telemetry</span>
-                )}
-              </div>
-              <div className="table-scroll">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>TAG / NAME</th>
-                      <th>VALUE</th>
-                      <th>QUALITY</th>
-                      <th>LAST UPDATE</th>
-                      <th>
-                        <span className="sr-only">Actions</span>
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {displayedTags.map((tag, i) => (
-                      <tr key={tag.id}>
-                        <td>
-                          <div className="table-tag">
-                            <span
-                              className="table-tag-icon"
-                              style={{
-                                color: colors[i % colors.length],
-                                background: `${colors[i % colors.length]}0c`,
-                              }}
-                            >
-                              <Activity size={17} />
-                            </span>
-                            <div>
-                              <strong>{tag.name}</strong>
-                              <span>{tag.id}</span>
-                            </div>
-                          </div>
-                        </td>
-                        <td>
-                          <span className="table-value">
-                            {format(tag.value)}
-                          </span>
-                          <span className="table-unit">{tag.unit}</span>
-                        </td>
-                        <td>
-                          <span
-                            className={`quality-pill ${tag.quality === "bad" ? "bad" : ""}`}
-                          >
-                            <span
-                              className={`quality-dot ${tag.quality === "bad" ? "bad" : ""}`}
-                            />
-                            {tag.quality === "good" ? "Good" : "Bad"}
-                          </span>
-                        </td>
-                        <td className="last-update">{time(tag.timestamp)}</td>
-                        <td>
-                          <button
-                            className="table-trend"
-                            aria-label={`View trend for ${tag.name}`}
-                            onClick={() => {
-                              setSelectedId(tag.id);
-                              navigate("Trends");
-                            }}
-                          >
-                            <TrendingUp size={16} />
-                            <span>Trend</span>
-                            <ChevronRight size={14} />
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              {!visibleTags.length && (
-                <div className="empty-state">
-                  <Tags size={25} />
-                  <p>
-                    {search
-                      ? "No tags match your search."
-                      : "No tags received yet."}
-                  </p>
-                  {search && (
-                    <button
-                      className="text-button"
-                      onClick={() => setSearch("")}
-                    >
-                      Clear search
-                    </button>
+                <div className="tag-rows">
+                  {g.tags.map((id) => {
+                    const tag = tags.find((t) => t.id === id);
+                    const trace = layout.traces.find((t) => t.id === id);
+                    return (
+                      <button
+                        className="tag-row"
+                        key={id}
+                        title={`Add ${tag?.name ?? id} to graph`}
+                        onClick={() => addTrace(id)}
+                      >
+                        <span>{tag?.name ?? id}</span>
+                        <strong
+                          style={{
+                            color: trace?.color ?? palette[i % palette.length],
+                          }}
+                        >
+                          {tag?.quality === "good" ? tag.value.toFixed(3) : "—"}
+                        </strong>
+                        <small>{tag?.unit || "—"}</small>
+                      </button>
+                    );
+                  })}
+                  {!g.tags.length && (
+                    <p className="empty">Add tags to this group.</p>
                   )}
                 </div>
-              )}
-              <div className="table-footer">
-                <span>
-                  Showing {displayedTags.length} of {visibleTags.length} tags
-                </span>
-                {page === "Tag explorer" && visibleTags.length > 25 ? (
-                  <div className="pagination">
-                    <button
-                      disabled={tablePage === 0}
-                      onClick={() => setTablePage((p) => p - 1)}
-                    >
-                      Previous
-                    </button>
-                    <span>
-                      Page {tablePage + 1} of{" "}
-                      {Math.ceil(visibleTags.length / 25)}
-                    </span>
-                    <button
-                      disabled={(tablePage + 1) * 25 >= visibleTags.length}
-                      onClick={() => setTablePage((p) => p + 1)}
-                    >
-                      Next
-                    </button>
-                  </div>
-                ) : (
-                  <span>
-                    <Database size={12} />
-                    History stored on server
-                  </span>
-                )}
-              </div>
-            </section>
-          )}
-          {page === "History" && (
-            <section className="panel tag-table-panel">
-              <div className="panel-heading">
-                <div>
-                  <div className="eyebrow">RECORDED SAMPLES</div>
-                  <h2>
-                    {selected?.name ?? "Tag history"}{" "}
-                    <span className="count-badge">{samples.length}</span>
-                  </h2>
+              </section>
+            );
+          })}
+          <button
+            className="add-group"
+            onClick={() =>
+              change((v) => ({
+                ...v,
+                groups: [
+                  ...v.groups,
+                  { id: crypto.randomUUID(), title: "New group", tags: [] },
+                ],
+              }))
+            }
+          >
+            <Plus size={18} />
+            Add group
+          </button>
+        </aside>
+        <main className="trend-panel">
+          <div className="panel-heading">
+            <TrendingUp size={24} />
+            <input
+              aria-label="Graph title"
+              value={layout?.chartTitle ?? "Trends"}
+              onChange={(e) =>
+                change((v) => ({ ...v, chartTitle: e.target.value }))
+              }
+            />
+            <button
+              onClick={() => {
+                setSearch("");
+                setModal("traces");
+              }}
+            >
+              <Plus size={17} />
+              Add Trace
+            </button>
+            <button
+              onClick={() => {
+                setSearch("");
+                setModal("traces");
+              }}
+            >
+              <Settings2 size={17} />
+              Configure Traces
+            </button>
+          </div>
+          <div className="trace-legend">
+            {layout?.traces.map((trace) => {
+              const tag = tags.find((t) => t.id === trace.id);
+              return (
+                <div className="trace-chip" key={trace.id}>
+                  <input
+                    type="checkbox"
+                    aria-label={`Show ${trace.id}`}
+                    checked={trace.visible}
+                    style={{ accentColor: trace.color }}
+                    onChange={(e) =>
+                      change((v) => ({
+                        ...v,
+                        traces: v.traces.map((t) =>
+                          t.id === trace.id
+                            ? { ...t, visible: e.target.checked }
+                            : t,
+                        ),
+                      }))
+                    }
+                  />
+                  <span>{tag?.name ?? trace.id}</span>
+                  <strong style={{ color: trace.color }}>
+                    {tag?.quality === "good" ? tag.value.toFixed(2) : "—"}{" "}
+                    <small>{tag?.unit}</small>
+                  </strong>
                 </div>
-                <button
-                  className="button secondary"
-                  onClick={exportCsv}
-                  disabled={!samples.length}
-                >
-                  <ArrowDownToLine size={15} />
-                  Export CSV
-                </button>
-              </div>
-              <div className="table-scroll history-table">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>TIMESTAMP</th>
-                      <th>TAG</th>
-                      <th>VALUE</th>
-                      <th>UNIT</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {[...samples]
-                      .reverse()
-                      .slice(0, 100)
-                      .map((sample) => (
-                        <tr key={sample.timestamp}>
-                          <td>{dateTime(sample.timestamp)}</td>
-                          <td className="tag-code">{selectedId}</td>
-                          <td className="table-value">
-                            {String(sample.value)}
-                          </td>
-                          <td>{selected?.unit}</td>
-                        </tr>
-                      ))}
-                  </tbody>
-                </table>
-                {!samples.length && (
-                  <div className="empty-state">
-                    <p>No samples to display.</p>
-                  </div>
-                )}
-              </div>
-              <div className="table-footer">
-                <span>Showing up to 100 latest representative samples</span>
-                <span>CSV includes all chart samples</span>
-              </div>
-            </section>
+              );
+            })}
+          </div>
+          <div className="chart" aria-label="Live multi-tag trend">
+            <TrendChart
+              readings={shown}
+              traces={layout?.traces ?? []}
+              tags={tags}
+              relative={relative}
+              domain={autoY ? undefined : [yMin, yMax]}
+            />
+          </div>
+          {!shown.length && (
+            <p className="chart-note">
+              Waiting for live samples. Trends accumulate while this page is
+              open.
+            </p>
           )}
-          <footer className="page-footer">
+          {!layout?.traces.length && (
+            <p className="chart-note">Add a trace to plot live values.</p>
+          )}
+          <div className="trend-footer">
             <span>
-              <Activity size={13} />
-              MP Web Client<span className="footer-separator">/</span>Process
-              visibility, everywhere.
+              <i className="live-dot" />
+              LIVE TRENDS
             </span>
             <span>
-              <Monitor size={13} />
-              <span className="desktop-label">Desktop layout</span>
-              <span className="tablet-label">Tablet layout</span>
-              <span className="phone-label">Mobile layout</span>
-              <span className="footer-separator">·</span>Read-only
+              {layout?.traces.filter((t) => t.visible).length ?? 0} visible
+              traces · {shown.length} live samples
             </span>
-          </footer>
+          </div>
         </main>
       </div>
-      {notice && (
-        <div className="toast" role="status">
-          <Check size={17} />
-          {notice}
+      <footer className="settings-panel">
+        <div className="panel-heading">
+          <Settings2 size={20} />
+          <strong>Chart Settings</strong>
         </div>
-      )}
+        <div className="settings-fields">
+          <label>
+            <span>Y Axis</span>
+            <div className="axis-inputs">
+              <input
+                aria-label="Y minimum"
+                type="number"
+                value={yMin}
+                onChange={(e) => setYMin(Number(e.target.value))}
+              />
+              <input
+                aria-label="Y maximum"
+                type="number"
+                value={yMax}
+                onChange={(e) => setYMax(Number(e.target.value))}
+              />
+            </div>
+          </label>
+          <label className="auto-axis">
+            <input
+              type="checkbox"
+              checked={autoY}
+              onChange={(e) => setAutoY(e.target.checked)}
+            />
+            Auto scale
+          </label>
+          <label>
+            Time Window (s)
+            <select
+              aria-label="Time window"
+              value={windowSeconds}
+              onChange={(e) => setWindowSeconds(Number(e.target.value))}
+            >
+              {[60, 300, 800, 1800, 3600].map((n) => (
+                <option key={n}>{n}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Update Rate (ms)
+            <select
+              aria-label="Update rate"
+              value={updateMs}
+              onChange={(e) => setUpdateMs(Number(e.target.value))}
+            >
+              {[500, 1000, 2000, 5000].map((n) => (
+                <option key={n}>{n}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Time Display
+            <select
+              aria-label="Time display"
+              value={relative ? "relative" : "clock"}
+              onChange={(e) => setRelative(e.target.value === "relative")}
+            >
+              <option value="relative">Relative (s)</option>
+              <option value="clock">Clock time</option>
+            </select>
+          </label>
+          <span className="read-only">
+            Read-only XML telemetry
+            <br />
+            No acquisition controls or recording
+          </span>
+        </div>
+        {!autoY && yMin >= yMax && (
+          <p role="alert">
+            Y minimum must be less than Y maximum. Using automatic scale.
+          </p>
+        )}
+      </footer>
       {modal && (
         <div
           className="modal-backdrop"
@@ -1051,217 +478,200 @@ export default function App() {
         >
           <div
             className="modal"
-            ref={dialogRef}
             role="dialog"
             aria-modal="true"
-            aria-labelledby="modal-title"
-            onKeyDown={(event) => {
-              if (event.key !== "Tab") return;
-              const focusable =
-                dialogRef.current?.querySelectorAll<HTMLElement>(
-                  "button:not([disabled]), input, select, a[href]",
-                );
-              if (!focusable?.length) return;
-              const first = focusable[0],
-                last = focusable[focusable.length - 1];
-              if (event.shiftKey && document.activeElement === first) {
-                event.preventDefault();
+            aria-labelledby="dialog-title"
+            ref={dialogRef}
+            onKeyDown={(e) => {
+              if (e.key !== "Tab") return;
+              const all = dialogRef.current?.querySelectorAll<HTMLElement>(
+                "button:not([disabled]), input, select",
+              );
+              if (!all?.length) return;
+              const first = all[0],
+                last = all[all.length - 1];
+              if (e.shiftKey && document.activeElement === first) {
+                e.preventDefault();
                 last.focus();
-              } else if (!event.shiftKey && document.activeElement === last) {
-                event.preventDefault();
+              } else if (!e.shiftKey && document.activeElement === last) {
+                e.preventDefault();
                 first.focus();
               }
             }}
           >
             <div className="modal-header">
-              <div className="modal-icon">
-                {modal === "layout" ? (
-                  <SlidersHorizontal size={22} />
-                ) : (
-                  <Radio size={22} />
-                )}
-              </div>
-              <button
-                className="icon-button"
-                aria-label="Close dialog"
-                onClick={() => setModal(null)}
-              >
-                <X size={21} />
+              <h2 id="dialog-title">
+                {modal === "source"
+                  ? "LabVIEW connection"
+                  : group
+                    ? `Edit ${group.title}`
+                    : "Configure Traces"}
+              </h2>
+              <button aria-label="Close dialog" onClick={() => setModal(null)}>
+                <X size={20} />
               </button>
             </div>
-            <h2 id="modal-title">
-              {modal === "layout"
-                ? "Make this device your own."
-                : "Connect your process."}
-            </h2>
-            {modal === "layout" ? (
+            {modal === "source" ? (
               <>
                 <p>
-                  Choose the tags and displays for your HMI panel. Preferences
-                  are saved in this browser, so each device can have its own
-                  view.
-                </p>
-                <div className="layout-choices">
-                  {tags.map((tag) => {
-                    const widget = draftWidgets.find(
-                      (item) => item.id === tag.id,
-                    );
-                    return (
-                      <div className="layout-choice" key={tag.id}>
-                        <label>
-                          <input
-                            type="checkbox"
-                            checked={Boolean(widget)}
-                            onChange={(e) =>
-                              setDraftWidgets((current) =>
-                                e.target.checked
-                                  ? [...current, { id: tag.id, kind: "gauge" }]
-                                  : current.filter(
-                                      (item) => item.id !== tag.id,
-                                    ),
-                              )
-                            }
-                          />
-                          <span>
-                            <strong>{tag.name}</strong>
-                            <small>
-                              {tag.id} · {tag.unit || "No unit"}
-                            </small>
-                          </span>
-                        </label>
-                        <select
-                          aria-label={`Display type for ${tag.name}`}
-                          disabled={!widget}
-                          value={widget?.kind ?? "gauge"}
-                          onChange={(e) =>
-                            setDraftWidgets((current) =>
-                              current.map((item) =>
-                                item.id === tag.id
-                                  ? {
-                                      ...item,
-                                      kind: e.target.value as Widget["kind"],
-                                    }
-                                  : item,
-                              ),
-                            )
-                          }
-                        >
-                          <option value="gauge">Range gauge</option>
-                          <option value="value">Numeric value</option>
-                        </select>
-                      </div>
-                    );
-                  })}
-                  {!tags.length && (
-                    <p>No tags are available to configure yet.</p>
-                  )}
-                </div>
-                <div className="modal-actions">
-                  <button
-                    className="button secondary"
-                    onClick={() => {
-                      setWidgets(null);
-                      try {
-                        localStorage.removeItem("mp-widgets-v1");
-                      } catch {
-                        /* session defaults still apply */
-                      }
-                      setModal(null);
-                    }}
-                  >
-                    Reset defaults
-                  </button>
-                  <button
-                    className="button primary"
-                    onClick={() => {
-                      setWidgets(draftWidgets);
-                      try {
-                        localStorage.setItem(
-                          "mp-widgets-v1",
-                          JSON.stringify(draftWidgets),
-                        );
-                        setNotice("Device view saved.");
-                      } catch {
-                        setNotice(
-                          "View applied for this session. Browser storage is unavailable.",
-                        );
-                      }
-                      setModal(null);
-                    }}
-                  >
-                    <Check size={16} />
-                    Save device view
-                  </button>
-                </div>
-              </>
-            ) : (
-              <>
-                <p>
-                  Your browser connects to the MP server. The server reads the
-                  XML service and records numeric values for historical trends.
-                </p>
-                <div className="connection-summary">
-                  <span>Current source</span>
-                  <strong>
-                    {demo ? "Simulated demonstration" : "XML web service"}
-                  </strong>
-                  <span>Polling interval</span>
-                  <strong>
-                    {snapshot
-                      ? `${snapshot.status.pollIntervalMs / 1000} seconds`
-                      : "—"}
-                  </strong>
-                  <span>Last successful read</span>
-                  <strong>
-                    {snapshot?.status.lastSuccess
-                      ? dateTime(snapshot.status.lastSuccess)
-                      : "No data yet"}
-                  </strong>
-                  <span>Connection</span>
-                  <strong
-                    className={sourceFailed ? "quality-bad" : "quality-good"}
-                  >
-                    {sourceFailed ? "Disconnected" : "Connected"}
-                  </strong>
-                </div>
-                <h3>Service configuration</h3>
-                <p>
-                  Set <code>XML_SERVICE_URL</code> in the server’s{" "}
-                  <code>.env</code> file, then restart the API. Keep
-                  authentication in <code>XML_SERVICE_AUTHORIZATION</code> on
-                  the server.
+                  The MP server reads your LabVIEW XML service. The dashboard
+                  only displays values; it never controls acquisition.
                 </p>
                 <p>
-                  For your laptop’s LabVIEW service, use{" "}
+                  On your Windows laptop, copy <code>.env.laptop.example</code>{" "}
+                  to <code>.env</code>, then run <code>npm.cmd ci</code>,{" "}
+                  <code>npm.cmd run build</code> and <code>npm.cmd start</code>.
+                </p>
+                <p>
+                  Set <code>XML_SERVICE_URL</code> to{" "}
                   <code>
                     http://127.0.0.1:8001/WebService1/Random_Number(GET)
                   </code>{" "}
-                  only when the MP server runs on that laptop. A cloud server
-                  needs a reachable service address.
+                  when MP runs on the same laptop. A cloud server needs a
+                  reachable service URL. Keep credentials in server
+                  configuration.
                 </p>
-                <pre>
-                  {
-                    "<Response><Terminal>\n  <Name>Array</Name>\n  <Value><DimSize>2</DimSize>\n    <Name>Numeric Control</Name>\n    <Value>8.644872989293326</Value>\n    <Name>Numeric Control</Name>\n    <Value>2.881289565370859</Value>\n  </Value>\n</Terminal></Response>"
-                  }
-                </pre>
-                <p className="modal-note">
-                  LabVIEW arrays, named tags, and numeric XML leaves are
-                  detected automatically. Array elements use stable zero-based
-                  IDs such as Array[0]. Other schemas can use an explicit{" "}
-                  <code>XML_TAG_MAP</code>. See README for examples. Never enter
-                  credentials into dashboard fields.
+                <p>
+                  Live trends are held temporarily in this browser, for up to
+                  one hour / 7,200 samples. Reloading clears them. No readings
+                  are recorded to disk.
                 </p>
-                <div className="modal-actions">
-                  <button
-                    className="button primary"
-                    onClick={() => setModal(null)}
-                  >
-                    Got it
-                    <ArrowRight size={16} />
-                  </button>
+              </>
+            ) : (
+              <>
+                {group && (
+                  <div className="group-edit">
+                    <label>
+                      Group title
+                      <input
+                        value={group.title}
+                        onChange={(e) =>
+                          editGroup(group.id, (g) => ({
+                            ...g,
+                            title: e.target.value,
+                          }))
+                        }
+                      />
+                    </label>
+                    <button
+                      className="danger"
+                      onClick={() => {
+                        change((v) => ({
+                          ...v,
+                          groups: v.groups.filter((g) => g.id !== group.id),
+                        }));
+                        setModal(null);
+                      }}
+                    >
+                      <Trash2 size={16} />
+                      Delete group
+                    </button>
+                  </div>
+                )}
+                <input
+                  className="search"
+                  aria-label="Search tags"
+                  placeholder="Search tags by name or ID…"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                />
+                <div className="tag-picker">
+                  {tags
+                    .filter((t) =>
+                      `${t.name} ${t.id}`
+                        .toLowerCase()
+                        .includes(search.toLowerCase()),
+                    )
+                    .map((tag) => {
+                      const trace = layout?.traces.find((t) => t.id === tag.id);
+                      const selected = group
+                        ? group.tags.includes(tag.id)
+                        : !!trace;
+                      return (
+                        <div className="picker-row" key={tag.id}>
+                          <label>
+                            <input
+                              type="checkbox"
+                              aria-label={`Include ${tag.id}`}
+                              checked={selected}
+                              onChange={(e) => {
+                                if (group)
+                                  editGroup(group.id, (g) => ({
+                                    ...g,
+                                    tags: e.target.checked
+                                      ? [...g.tags, tag.id]
+                                      : g.tags.filter((id) => id !== tag.id),
+                                  }));
+                                else if (e.target.checked) addTrace(tag.id);
+                                else
+                                  change((v) => ({
+                                    ...v,
+                                    traces: v.traces.filter(
+                                      (t) => t.id !== tag.id,
+                                    ),
+                                  }));
+                              }}
+                            />
+                            <span>
+                              {tag.name}
+                              <small>
+                                {tag.id} · {tag.unit || "No unit"}
+                              </small>
+                            </span>
+                          </label>
+                          {!group && trace && (
+                            <>
+                              <input
+                                type="color"
+                                aria-label={`Color ${tag.id}`}
+                                value={trace.color}
+                                onChange={(e) =>
+                                  change((v) => ({
+                                    ...v,
+                                    traces: v.traces.map((t) =>
+                                      t.id === tag.id
+                                        ? { ...t, color: e.target.value }
+                                        : t,
+                                    ),
+                                  }))
+                                }
+                              />
+                              <label className="visibility">
+                                <input
+                                  type="checkbox"
+                                  aria-label={`Visible ${tag.id}`}
+                                  checked={trace.visible}
+                                  onChange={(e) =>
+                                    change((v) => ({
+                                      ...v,
+                                      traces: v.traces.map((t) =>
+                                        t.id === tag.id
+                                          ? { ...t, visible: e.target.checked }
+                                          : t,
+                                      ),
+                                    }))
+                                  }
+                                />
+                                Visible
+                              </label>
+                            </>
+                          )}
+                        </div>
+                      );
+                    })}
+                  {!tags.length && (
+                    <p>No tags available. Check the connection.</p>
+                  )}
                 </div>
+                <p className="muted">
+                  Changes save automatically in this browser. Click a group
+                  value to add it to the graph.
+                </p>
               </>
             )}
+            <button className="done" onClick={() => setModal(null)}>
+              Done
+            </button>
           </div>
         </div>
       )}

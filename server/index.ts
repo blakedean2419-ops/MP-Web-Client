@@ -1,8 +1,8 @@
-import { mkdirSync, readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { loadEnvFile } from "node:process";
 import express from "express";
-import { Store } from "./store.js";
+import type { Tag } from "../src/types.js";
 import { demoTags } from "./demo.js";
 import { parseTags, type TagMapping } from "./xml.js";
 import { createApp } from "./app.js";
@@ -13,21 +13,16 @@ const serviceUrl = process.env.XML_SERVICE_URL?.trim();
 if (serviceUrl && !["http:", "https:"].includes(new URL(serviceUrl).protocol))
   throw new Error("XML_SERVICE_URL must be HTTP or HTTPS.");
 const interval = Number(process.env.POLL_INTERVAL_MS || 2000);
-const retentionDays = Number(process.env.HISTORY_RETENTION_DAYS || 30);
 if (!Number.isFinite(interval) || interval < 500 || interval > 3600000)
   throw new Error("POLL_INTERVAL_MS must be between 500 and 3600000.");
-if (
-  !Number.isFinite(retentionDays) ||
-  retentionDays < 1 ||
-  retentionDays > 3650
-)
-  throw new Error("HISTORY_RETENTION_DAYS must be between 1 and 3650.");
-const dataDir = resolve(
-  process.env.DATA_DIR || "data",
-  serviceUrl ? "xml" : "demo",
-);
-mkdirSync(dataDir, { recursive: true });
-const store = new Store(resolve(dataDir, "history.sqlite"));
+// Keep only the latest snapshot. No measurement database or historical recording.
+let currentTags: Tag[] = [];
+const store = {
+  tags: () => currentTags,
+  write: (tags: Tag[]) => {
+    currentTags = tags;
+  },
+};
 const mappings: TagMapping[] | undefined = process.env.XML_TAG_MAP
   ? JSON.parse(readFileSync(process.env.XML_TAG_MAP, "utf8"))
   : undefined;
@@ -39,14 +34,8 @@ const status: Status = {
   pollIntervalMs: interval,
 };
 
-if (!serviceUrl && store.tags().length === 0) {
-  const now = Date.now();
-  for (let timestamp = now - 3600000; timestamp < now; timestamp += 10000)
-    store.write(demoTags(timestamp));
-}
 let timer: ReturnType<typeof setTimeout> | undefined;
 let stopping = false;
-let lastPrune = 0;
 async function poll() {
   try {
     if (serviceUrl) {
@@ -83,10 +72,6 @@ async function poll() {
     status.connected = true;
     status.lastSuccess = Date.now();
     status.error = null;
-    if (Date.now() - lastPrune > 3600000) {
-      store.prune(Date.now() - retentionDays * 86400000);
-      lastPrune = Date.now();
-    }
   } catch (error) {
     status.connected = false;
     // Never include upstream URLs, headers, or credentials in API responses/logs.
@@ -117,10 +102,9 @@ function shutdown() {
   stopping = true;
   if (timer) clearTimeout(timer);
   server.close(() => {
-    store.close();
     process.exit(0);
   });
-  // Do not close SQLite while an in-flight poll is using it; bound shutdown instead.
+  // Bound shutdown if a request is still in flight.
   setTimeout(() => process.exit(0), 12000).unref();
 }
 process.on("SIGINT", shutdown);

@@ -1,87 +1,106 @@
 import {
-  Area,
-  AreaChart,
   CartesianGrid,
+  Line,
+  LineChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
-import type { Sample, Tag } from "./types";
-
+import type { Tag } from "./types";
+export type Trace = { id: string; color: string; visible: boolean };
+export type Reading = {
+  timestamp: number;
+  values: Record<string, number | null>;
+};
 export default function TrendChart({
-  samples,
-  tag,
+  readings,
+  traces,
+  tags,
+  relative,
+  domain,
 }: {
-  samples: Sample[];
-  tag?: Tag;
+  readings: Reading[];
+  traces: Trace[];
+  tags: Tag[];
+  relative: boolean;
+  domain?: [number, number];
 }) {
+  const start = readings[0]?.timestamp ?? 0;
+  const data = readings.map((r) => ({
+    timestamp: r.timestamp,
+    ...Object.fromEntries(
+      traces.map((t, i) => [`trace${i}`, r.values[t.id] ?? null]),
+    ),
+  }));
   return (
     <ResponsiveContainer width="100%" height="100%">
-      <AreaChart
-        data={samples}
-        margin={{ top: 20, right: 18, left: -18, bottom: 5 }}
+      <LineChart
+        data={data}
+        margin={{ top: 22, right: 24, left: 5, bottom: 25 }}
       >
-        <defs>
-          <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#159d8b" stopOpacity={0.17} />
-            <stop offset="100%" stopColor="#159d8b" stopOpacity={0.01} />
-          </linearGradient>
-        </defs>
-        <CartesianGrid
-          strokeDasharray="3 5"
-          vertical={false}
-          stroke="#e8edec"
-        />
+        <CartesianGrid stroke="#23343e" strokeDasharray="3 3" />
         <XAxis
           dataKey="timestamp"
           type="number"
           domain={["dataMin", "dataMax"]}
+          stroke="#97a9b8"
+          minTickGap={45}
+          tick={{ fontSize: 12 }}
           tickFormatter={(n) =>
-            new Date(n).toLocaleTimeString([], {
-              hour: "2-digit",
-              minute: "2-digit",
-            })
+            relative
+              ? ((n - start) / 1000).toFixed(0)
+              : new Date(n).toLocaleTimeString()
           }
-          tick={{ fontSize: 11, fill: "#89918f" }}
-          axisLine={false}
-          tickLine={false}
-          minTickGap={55}
-          dy={10}
-        />
-        <YAxis
-          domain={["auto", "auto"]}
-          tick={{ fontSize: 11, fill: "#89918f" }}
-          tickFormatter={(n) =>
-            Number(n).toLocaleString(undefined, { maximumFractionDigits: 2 })
-          }
-          axisLine={false}
-          tickLine={false}
-          width={66}
-        />
-        <Tooltip
-          labelFormatter={(n) => new Date(Number(n)).toLocaleString()}
-          formatter={(value) => [
-            `${Number(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 })} ${tag?.unit ?? ""}`,
-            tag?.name ?? "Value",
-          ]}
-          contentStyle={{
-            border: "1px solid #e3e8e6",
-            borderRadius: 10,
-            fontSize: 12,
+          label={{
+            value: relative ? "Time (s)" : "Time",
+            position: "bottom",
+            fill: "#d6e1ea",
           }}
         />
-        <Area
-          type="linear"
-          dataKey="value"
-          stroke="#159d8b"
-          strokeWidth={2.3}
-          fill="url(#trendFill)"
-          isAnimationActive={false}
-          dot={false}
-          activeDot={{ r: 5, stroke: "#fff", strokeWidth: 3 }}
+        <YAxis
+          domain={domain && domain[0] < domain[1] ? domain : ["auto", "auto"]}
+          allowDataOverflow
+          stroke="#97a9b8"
+          tick={{ fontSize: 12 }}
+          width={65}
+          label={{
+            value: "Amplitude",
+            angle: -90,
+            position: "insideLeft",
+            fill: "#d6e1ea",
+          }}
         />
-      </AreaChart>
+        <Tooltip
+          labelFormatter={(n) => new Date(Number(n)).toLocaleTimeString()}
+          contentStyle={{
+            background: "#0c1c29",
+            border: "1px solid #2c5572",
+            borderRadius: 6,
+          }}
+          formatter={(value, name) => [
+            Number(value).toLocaleString(undefined, {
+              maximumFractionDigits: 6,
+            }),
+            name,
+          ]}
+        />
+        {traces.map(
+          (t, i) =>
+            t.visible && (
+              <Line
+                key={t.id}
+                dataKey={`trace${i}`}
+                name={`${tags.find((tag) => tag.id === t.id)?.name ?? t.id} (${tags.find((tag) => tag.id === t.id)?.unit || "no unit"})`}
+                stroke={t.color}
+                strokeWidth={2}
+                dot={data.length === 1}
+                connectNulls={false}
+                isAnimationActive={false}
+              />
+            ),
+        )}
+      </LineChart>
     </ResponsiveContainer>
   );
 }

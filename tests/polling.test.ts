@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import type { AddressInfo } from "node:net";
 import { labviewSample, labviewXml } from "../server/labview-sample.js";
@@ -28,7 +28,7 @@ async function waitFor<T>(
 }
 
 test(
-  "real polling ingests the supplied LabVIEW XML, records history, reports failure, and recovers",
+  "real polling ingests the supplied LabVIEW XML, keeps only live values, reports failure, and recovers",
   { timeout: 20000 },
   async () => {
     let failing = false;
@@ -84,10 +84,19 @@ test(
       assert.equal(initial.status.mode, "xml");
       assert.equal(initial.tags[0].value, labviewSample[0]);
       assert.ok(authenticatedRequests > 0);
-      const history = await fetch(
-        `http://127.0.0.1:${apiPort}/api/history?tag=Array%5B0%5D&from=${Date.now() - 60000}`,
-      ).then((r) => r.json());
-      assert.equal(history.samples[0].value, labviewSample[0]);
+      assert.equal(
+        (
+          await fetch(
+            `http://127.0.0.1:${apiPort}/api/history?tag=Array%5B0%5D&from=0`,
+          )
+        ).status,
+        404,
+      );
+      assert.deepEqual(
+        readdirSync(directory),
+        [],
+        "polling must not create recorded data files",
+      );
       failing = true;
       const stale = await waitFor(read, (s) => !s.status.connected);
       assert.equal(stale.status.error, "XML service returned HTTP 503.");

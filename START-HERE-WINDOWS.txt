@@ -26,7 +26,8 @@ MP WEB CLIENT - WINDOWS LAPTOP QUICK START
    The client should show 100 tags. Successful live readings remove the demo
    banner. A failed service connection is shown as an error, not demo data.
 10. Press Ctrl+C to stop. Next time, open a terminal in the same folder and
-    run npm.cmd start. History is retained under the data folder.
+    run npm.cmd start. Live trends restart when the browser page reloads.
+    No measurement history is recorded to disk.
 
 If npm is not recognized, close and reopen the terminal after installing Node.
 No Git, Python, separate database, Docker or browser extension is required.
